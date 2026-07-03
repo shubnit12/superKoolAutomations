@@ -79,7 +79,7 @@ async function runOnce(resumePath: string): Promise<void> {
   // bundled Chromium — its modern headless mode is far harder to detect.
   const browser = await chromium.launch({
     headless: HEADLESS,
-    channel: 'chrome',
+    channel: 'chromium',
     args: ['--disable-blink-features=AutomationControlled'],
   });
   try {
