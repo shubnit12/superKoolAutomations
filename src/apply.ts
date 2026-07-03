@@ -84,7 +84,7 @@ async function runOnce(): Promise<ApplyStats> {
   // session fingerprint stays consistent with what `npm run login` saved.
   const browser = await chromium.launch({
     headless: HEADLESS,
-    channel: 'chrome',
+    channel: 'chromium',
     args: ['--disable-blink-features=AutomationControlled'],
   });
 
