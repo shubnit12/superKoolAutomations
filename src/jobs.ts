@@ -531,7 +531,9 @@ async function runChatbotLoop(
           const chose =
             fb.kind === 'radio'
               ? `last-option [${fb.label ?? '?'}]`
-              : `"${fb.label ?? 'NA'}"`;
+              : fb.kind === 'multiselect'
+                ? `checkbox [${fb.label ?? '?'}]`
+                : `"${fb.label ?? 'NA'}"`;
           console.log(
             `[jobs] chatbot Q${step + 1}: FALLBACK ${fb.kind} ${chose} ` +
               `(${fallbacksUsed}/${maxFallbacks} fallbacks used)`,
@@ -574,7 +576,42 @@ async function runChatbotLoop(
 
     const ok = await applyAnswer(popup, answer.text, answer.kind);
     if (!ok) {
-      console.log(`[jobs] chatbot: could not enter answer for ${answer.label}`);
+      // Rule matched but the chatbot is presenting the question in a
+      // different input format than we expected — e.g., a numeric
+      // "years of experience in X" question being shown as radio
+      // buckets instead of a text box. Rather than bailing on the whole
+      // job, fall through to the heuristic fallback which knows how to
+      // pick a sensible bucket (Strategy 0b in applyFallbackAnswer for
+      // tech-experience questions; Strategy 1 last-option otherwise).
+      console.log(
+        `[jobs] chatbot: rule "${answer.label}" expected ${answer.kind} ` +
+          `but DOM had no matching input — trying fallback`,
+      );
+      if (fallbacksUsed < maxFallbacks) {
+        const fb = await applyFallbackAnswer(popup, polled.question);
+        if (fb.kind !== 'none') {
+          await clickChatbotSave(popup);
+          fallbacksUsed++;
+          const chose =
+            fb.kind === 'radio'
+              ? `radio [${fb.label ?? '?'}]`
+              : fb.kind === 'multiselect'
+                ? `checkbox [${fb.label ?? '?'}]`
+                : `text "${fb.label ?? 'NA'}"`;
+          console.log(
+            `[jobs] chatbot Q${step + 1}: FALLBACK after kind-mismatch — ` +
+              `${chose} (${fallbacksUsed}/${maxFallbacks} fallbacks used)`,
+          );
+          seenCount = polled.botMsgCount;
+          continue;
+        }
+      } else {
+        console.log(
+          `[jobs] chatbot: reached fallback cap (${maxFallbacks}) on kind-mismatch — bailing`,
+        );
+      }
+      // Fallback didn't fire (cap reached, or no usable input found) —
+      // dump and bail like before.
       await dumpChatbotDebug(popup, 'apply-answer-failed');
       return { outcome: 'unknown', skipsUsed, fallbacksUsed };
     }
@@ -602,7 +639,7 @@ async function runChatbotLoop(
 async function applyFallbackAnswer(
   popup: Page,
   questionText: string,
-): Promise<{ kind: 'radio' | 'text' | 'none'; label?: string }> {
+): Promise<{ kind: 'radio' | 'text' | 'multiselect' | 'none'; label?: string }> {
   // Strategy 0: heuristic for tech-experience questions.
   //
   // Naukri recruiters often phrase a numeric-experience question in
@@ -610,10 +647,22 @@ async function applyFallbackAnswer(
   // "Years on AWS", "Python REST API exp"). When the question
   // (a) mentions a recognised tech keyword AND (b) mentions an
   // experience-related word AND (c) doesn't look like a Yes/No, we
-  // fill the text input with the relevant-experience value (env-
-  // controlled via NAUKRI_RELEVANT_EXPERIENCE, default "3.5"). This
-  // is far more accurate than a blanket "NA".
+  // pick a sensible numeric answer two ways:
+  //
+  //   0a. If a text input is reachable → fill with NAUKRI_RELEVANT_EXPERIENCE
+  //       (default "3.5").
+  //   0b. Otherwise, if the chatbot is showing radio buckets like
+  //       ["No experience", "<2 years", "2-4 years", "4-6 years",
+  //        "6-8 years", ">8 years"], pick the FIRST option whose label
+  //       contains "3" or "4". For 3.5 years of experience that maps to
+  //       "2-4 years" — far better than falling through to Strategy 1
+  //       which would pick the LAST option (">8 years", a recruiter
+  //       red-flag for an early-career applicant).
+  //
+  // Tune the digit set via NAUKRI_TECH_EXP_RADIO_DIGITS (e.g., "45" for
+  // someone with 4–5 years would prefer the 4-6 bucket).
   if (questionText && looksLikeTechExperienceQuestion(questionText)) {
+    // (0a) Text input branch.
     const textInput = popup.locator('[id^="userInput__"]').first();
     if ((await textInput.count()) > 0) {
       try {
@@ -622,8 +671,77 @@ async function applyFallbackAnswer(
         await textInput.fill(years);
         return { kind: 'text', label: `${years} (tech-experience heuristic)` };
       } catch {
-        // No reachable text input — fall through to radio strategies.
+        // No reachable text input — fall through to the radio branch.
       }
+    }
+
+    // (0b) Radio branch — first option matching the preferred digits.
+    const digits = (process.env.NAUKRI_TECH_EXP_RADIO_DIGITS ?? '34').trim() || '34';
+    // Build the character class once. Escape just in case someone passes
+    // regex-special chars by mistake.
+    const digitClass = new RegExp(`[${digits.replace(/[\\\]\^\-]/g, '\\$&')}]`);
+    const techContainers = popup.locator('.ssrc__radio-btn-container');
+    const techCount = await techContainers.count().catch(() => 0);
+    let matchedIdx = -1;
+    let matchedLabel = '';
+    for (let i = 0; i < techCount; i++) {
+      const label = (await techContainers.nth(i).innerText().catch(() => '')).trim();
+      if (digitClass.test(label)) {
+        matchedIdx = i;
+        matchedLabel = label;
+        break;
+      }
+    }
+    if (matchedIdx >= 0) {
+      const target = techContainers.nth(matchedIdx);
+      // Same proven click order as Strategy 1: <label> first, then the
+      // raw <input> for older DOMs. Browsers dispatch a synthetic click
+      // on the input whose id matches `<label for="...">`, sailing past
+      // any custom onclick handler Naukri puts on the radio itself.
+      try {
+        const labelEl = target.locator('label').first();
+        if ((await labelEl.count()) > 0) {
+          await labelEl.click({ force: true, timeout: 2_000 });
+          return {
+            kind: 'radio',
+            label: `${matchedLabel} (tech-experience heuristic)`,
+          };
+        }
+      } catch {
+        // Fall through to input click.
+      }
+      try {
+        const radioInput = target.locator('input[type="radio"]').first();
+        if ((await radioInput.count()) > 0) {
+          await radioInput.click({ force: true, timeout: 2_000 });
+          return {
+            kind: 'radio',
+            label: `${matchedLabel} (tech-experience heuristic)`,
+          };
+        }
+      } catch {
+        // Both clicks failed — fall through to Strategy 1 below as a
+        // last resort.
+      }
+    }
+  }
+
+  // Strategy 0c: multi-select checkbox — tick the FIRST real option.
+  //
+  // Policy: when our configured value isn't among the offered options
+  // (e.g. a "preferred location" list that doesn't include our city), we
+  // accept an offered option to keep the application moving rather than
+  // bailing. The built-in "Skip this question" pseudo-option is ignored
+  // so we commit a genuine answer. Clicks the `<label>` (proven path).
+  const mccLabels = popup.locator('.mcc__label:visible');
+  const mccCount = await mccLabels.count().catch(() => 0);
+  if (mccCount > 0) {
+    for (let i = 0; i < mccCount; i++) {
+      const el = mccLabels.nth(i);
+      const label = (await el.innerText().catch(() => '')).trim();
+      if (!label || /^skip this question$/i.test(label)) continue;
+      await el.click({ force: true }).catch(() => {});
+      return { kind: 'multiselect', label };
     }
   }
 
@@ -861,6 +979,19 @@ async function applyAnswer(
   value: string,
   kind: 'text' | 'radio',
 ): Promise<boolean> {
+  // Multi-select checkbox widget (e.g. "What is your preferred work
+  // location?"). Naukri renders these as `.mcc__checkbox` inputs with
+  // `.mcc__label` labels inside `.multicheckboxes-container` — a THIRD
+  // input type distinct from the text box and the radio buttons. When one
+  // is on screen, neither the `[id^="userInput__"]` text path nor the
+  // `.ssrc__radio-btn-container` radio path applies, so handle it here:
+  // tick the option whose label matches `value`. Returns false when the
+  // value isn't among the offered options, so the caller's fallback can
+  // pick the first real option instead.
+  if ((await popup.locator('.mcc__checkbox:visible').count()) > 0) {
+    return tickMultiSelectByValue(popup, value);
+  }
+
   if (kind === 'radio') {
     // Radio answers live inside `.ssrc__radio-btn-container`. We click
     // the option whose label matches our value.
@@ -875,11 +1006,51 @@ async function applyAnswer(
 
   // Text input: Naukri uses ids like `userInput__<random>InputBox`.
   // Anchor on the stable prefix so the random suffix doesn't break us.
+  //
+  // CAVEAT: Naukri keeps this contenteditable `<div>` in the DOM even
+  // when the chatbot is showing a radio-bucket question — it's just
+  // `visibility: hidden`. A naive `.fill()` then blocks for the full
+  // 30s Playwright actionability timeout waiting for visibility, which
+  // (a) makes a single bad question stretch the whole apply run, and
+  // (b) often times out only AFTER the page has navigated, masking the
+  // failure as "Target page, context or browser has been closed".
+  //
+  // Short-circuit with an explicit 1.5s visibility wait. On miss we
+  // return `false` quickly so the caller's kind-mismatch path can drop
+  // to the radio fallback (e.g., Strategy 0b in applyFallbackAnswer).
   const input = popup.locator('[id^="userInput__"]').first();
   if ((await input.count()) === 0) return false;
+  try {
+    await input.waitFor({ state: 'visible', timeout: 1_500 });
+  } catch {
+    return false;
+  }
   await input.click({ force: true }).catch(() => {});
   await input.fill(value);
   return true;
+}
+
+/**
+ * Tick a multi-select checkbox option whose label matches `value`
+ * (case-insensitive, trimmed). Clicks the `<label>` — the same proven
+ * path the radio handler uses — so Naukri's custom onChange fires
+ * reliably. Ignores the built-in "Skip this question" pseudo-option.
+ * Returns true only when a real option matched and was clicked.
+ */
+async function tickMultiSelectByValue(popup: Page, value: string): Promise<boolean> {
+  const target = value.trim().toLowerCase();
+  if (!target) return false;
+  const labels = popup.locator('.mcc__label:visible');
+  const count = await labels.count().catch(() => 0);
+  for (let i = 0; i < count; i++) {
+    const text = (await labels.nth(i).innerText().catch(() => '')).trim();
+    if (!text || /^skip this question$/i.test(text)) continue;
+    if (text.toLowerCase() === target) {
+      await labels.nth(i).click({ force: true }).catch(() => {});
+      return true;
+    }
+  }
+  return false;
 }
 
 /**
