@@ -52,7 +52,7 @@ export async function refreshAuth(): Promise<string> {
   // sees a consistent browser fingerprint across login + reuse.
   const browser = await chromium.launch({
     headless: HEADLESS,
-    channel: 'chrome',
+    channel: 'chromium',
     args: ['--disable-blink-features=AutomationControlled'],
   });
 
