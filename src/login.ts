@@ -24,7 +24,7 @@ async function main(): Promise<void> {
   console.log('[login] opening Chrome...');
   const browser = await chromium.launch({
     headless: true,
-    channel: 'chrome',
+    channel: 'chromium',
     args: ['--disable-blink-features=AutomationControlled'],
   });
   // Use the same Desktop Chrome profile that `src/index.ts` uses so the
