@@ -398,25 +398,49 @@ async function detectApplyOutcome(
   timeoutMs: number,
   nestedTabPromise: Promise<Page | null>,
 ): Promise<ApplyOutcome> {
+  // Each arm RESOLVES only when its condition is actually met and REJECTS
+  // otherwise (on timeout, or — for the nested tab — when no tab opened).
+  // We then use `Promise.any`, which resolves with the first *fulfilled*
+  // arm and ignores rejections.
+  //
+  // WHY NOT Promise.race (the previous approach): the nested-tab arm has a
+  // deliberately short (2.5s) window because external tabs open fast. With
+  // Promise.race, that arm resolving to `null` at 2.5s would SETTLE the race
+  // first and short-circuit the whole detection to 2.5s — so any success
+  // toast or chatbot drawer taking longer than 2.5s to appear (common on
+  // higher-latency servers, e.g. a cloud VM far from Naukri's origin) was
+  // missed and the job wrongly logged as "no observable outcome after Apply".
+  // With Promise.any the success/chatbot arms get their full `timeoutMs`.
   const success = popup
     .getByText(/applied to "|application sent|successfully applied|you have applied/i)
     .first()
     .waitFor({ state: 'visible', timeout: timeoutMs })
-    .then(() => ({ kind: 'success' as const, detail: 'success-toast' }))
-    .catch(() => null);
+    .then(() => ({ kind: 'success' as const, detail: 'success-toast' }));
 
   const chatbot = popup
     .locator('.chatbot_DrawerContentWrapper, [class*="chatbot_Drawer" i]')
     .first()
     .waitFor({ state: 'visible', timeout: timeoutMs })
-    .then(() => ({ kind: 'chatbot' as const, detail: 'drawer-opened' }))
-    .catch(() => null);
+    .then(() => ({ kind: 'chatbot' as const, detail: 'drawer-opened' }));
 
-  const nestedTab = nestedTabPromise.then((tab) =>
-    tab ? { kind: 'external' as const, detail: tab.url(), tab } : null,
-  );
+  const external = nestedTabPromise.then((tab) => {
+    if (tab) return { kind: 'external' as const, detail: tab.url(), tab };
+    // No tab within its short window — reject so Promise.any ignores this
+    // arm rather than letting a `null` short-circuit the other two.
+    throw new Error('no-nested-tab');
+  });
 
-  const winner = await Promise.race([success, chatbot, nestedTab]);
+  let winner:
+    | { kind: 'success'; detail: string }
+    | { kind: 'chatbot'; detail: string }
+    | { kind: 'external'; detail: string; tab: Page }
+    | null;
+  try {
+    winner = await Promise.any([success, chatbot, external]);
+  } catch {
+    // All arms rejected → nothing observable within the timeout.
+    winner = null;
+  }
 
   if (winner && winner.kind === 'external') {
     await winner.tab.close().catch(() => {});
