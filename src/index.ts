@@ -26,7 +26,7 @@ dotenv.config({ path: path.resolve(__dirname, '..', '.env') });
 
 const AUTH_FILE = path.resolve(__dirname, '..', 'auth.json');
 const RESUME_URL = process.env.RESUME_URL ?? 'https://api.shubnit.com/resume';
-const HEADLESS = (process.env.HEADLESS ?? 'true').toLowerCase() !== 'false';
+const HEADLESS = true
 
 async function main(): Promise<void> {
   console.log(`[${new Date().toISOString()}] naukri-automation starting`);
