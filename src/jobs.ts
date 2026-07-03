@@ -377,6 +377,12 @@ async function drivePopup(
       } else {
         stats.skippedAlready++;
         console.log('[jobs] no observable outcome after Apply — treating as no-op');
+        // Capture the post-Apply DOM + screenshot so we can tell whether
+        // this was genuinely already-applied (page shows an "already
+        // applied" state) or an instant-apply whose success toast uses
+        // wording our regex doesn't match yet. Files land in /tmp as
+        // naukri-chatbot-no-observable-outcome-<timestamp>.{html,png}.
+        await dumpChatbotDebug(popup, 'no-observable-outcome');
       }
       return;
     }
