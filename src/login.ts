@@ -23,7 +23,7 @@ const PASSWORD = process.env.NAUKRI_PASSWORD ?? '';
 async function main(): Promise<void> {
   console.log('[login] opening Chrome...');
   const browser = await chromium.launch({
-    headless: false,
+    headless: true,
     channel: 'chrome',
     args: ['--disable-blink-features=AutomationControlled'],
   });
@@ -45,7 +45,16 @@ async function main(): Promise<void> {
     await page.getByRole('textbox', { name: 'Enter Password' }).fill(PASSWORD);
   }
 
-  console.log('[login] please click Login in the browser (and handle any captcha / OTP).');
+  // Auto-click the Login button when both creds are present, so you don't
+  // have to. The submit button renders as `<button type="submit">Login</button>`
+  // — match it by role + exact text (same selector src/naukri.ts uses).
+  // If a captcha / OTP appears after this, you still handle that manually.
+  if (EMAIL && PASSWORD) {
+    await page.getByRole('button', { name: 'Login', exact: true }).click();
+    console.log('[login] clicked Login — handle any captcha / OTP if prompted.');
+  } else {
+    console.log('[login] please click Login in the browser (and handle any captcha / OTP).');
+  }
   console.log('[login] waiting up to 5 minutes for successful redirect...');
 
   // Successful login takes us away from /nlogin/...
