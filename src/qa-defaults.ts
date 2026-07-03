@@ -80,6 +80,18 @@ const ENTRIES: Entry[] = [
     label: 'relocation willingness',
   },
   {
+    // TEXT variant: "What is your preferred work location?" / "Which is
+    // your preferred location?" — the chatbot wants a city name typed in,
+    // NOT a Yes/No. Must be tested BEFORE the radio rule below, whose
+    // broader /preferred.*location.*\?/ pattern would otherwise swallow
+    // this phrasing and (wrongly) answer "Yes". Sources the city from
+    // NAUKRI_CURRENT_LOCATION.
+    match: /(what|which).*preferred.*location/i,
+    envVar: 'NAUKRI_CURRENT_LOCATION',
+    kind: 'text',
+    label: 'preferred work location (city)',
+  },
+  {
     match: /preferred.*location.*\?|are you ok.*location/i,
     envVar: 'NAUKRI_PREFERRED_LOCATION_OK',
     kind: 'radio',
@@ -169,6 +181,21 @@ const ENTRIES: Entry[] = [
     match: /pf\s*\/?\s*uan|provident\s*fund|cleared.*uan/i,
     envVar: 'NAUKRI_PF_UAN_CLEARED',
     label: 'PF/UAN cleared',
+  },
+
+  // ── Employment status ──────────────────────────────────────────────
+  // Layoff-related questions ("Are you got laid off?", "Were you part
+  // of a RIF?", etc.). Defaults to "No" — saying you were laid off can
+  // be a red flag for some recruiters; override with NAUKRI_WAS_LAID_OFF=Yes
+  // if you're specifically applying to roles that welcome laid-off
+  // candidates and want the visibility. Anchored on `\b` so we don't
+  // match "fired up" or "terminated session" in unrelated contexts.
+  {
+    match: /\b(laid\s*off|let\s*go|terminat(ed|ion)|got\s*fired|been\s*fired|were\s*fired|\brif\b|reduction\s*in\s*force)\b/i,
+    envVar: 'NAUKRI_WAS_LAID_OFF',
+    kind: 'radio',
+    label: 'was laid off',
+    default: 'No',
   },
 
   // ── Positive-default radios ────────────────────────────────────────
