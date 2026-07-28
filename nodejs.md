@@ -83,85 +83,445 @@ A runner for package binaries. It executes a CLI from local `node_modules/.bin` 
 
 ## 2. Core JavaScript for Node Interviews
 
+*This section is intentionally more detailed than the rest of the document — these fundamentals are where interviewers dig deepest and chain follow-up questions. Each topic: concept → small example → the trap they'll probe.*
+
 ### var vs let vs const?
-`var` is function-scoped and hoisted with value `undefined`; redeclaration allowed. `let`/`const` are block-scoped and hoisted into the *temporal dead zone* — accessing them before the declaration line throws a ReferenceError. `const` means the *binding* can't be reassigned; the object it points to is still mutable (`const arr = []; arr.push(1)` is legal). Default to `const`, use `let` when reassigning, never `var`.
+Three differences matter: **scope**, **hoisting behavior**, and **reassignment**.
+
+**Scope** — `var` is function-scoped; `let`/`const` are block-scoped (any `{ }`):
+```js
+function demo() {
+  if (true) {
+    var a = 1;
+    let b = 2;
+  }
+  console.log(a); // 1 — var ignores the block, lives in the whole function
+  console.log(b); // ReferenceError — b existed only inside the if-block
+}
+```
+
+**Hoisting** — `var` is hoisted *and initialized* to `undefined`; `let`/`const` are hoisted but left uninitialized in the **temporal dead zone (TDZ)** until their declaration line:
+```js
+console.log(x); // undefined  (no error — var was pre-initialized)
+var x = 5;
+console.log(y); // ReferenceError: Cannot access 'y' before initialization (TDZ)
+let y = 5;
+```
+
+**Reassignment** — `const` locks the *binding*, not the value. The object it points to stays mutable:
+```js
+const user = { name: 'A' };
+user.name = 'B';   // ✅ fine — mutating the object
+user = {};         // ❌ TypeError — reassigning the binding
+const nums = [1];
+nums.push(2);      // ✅ fine
+// Need real immutability? Object.freeze(user) — but it's shallow.
+```
+Two extra nuances worth dropping: `var` allows silent redeclaration in the same scope (`let` throws), and in Node a top-level `var` stays inside the module (module code has its own scope) — it does **not** become a global, unlike `var` in a classic browser script. Rule: default to `const`, use `let` when you must reassign, never `var`.
 
 ### What is hoisting?
-During compilation, declarations are registered before code runs. Function *declarations* are fully hoisted (callable before their line). `var` is hoisted and initialized to `undefined`. `let`/`const`/`class` are hoisted but uninitialized (TDZ). Function *expressions* and arrow functions follow the rules of the variable they're assigned to.
-
-### Explain closures with an example.
-A closure is a function that keeps access to variables from its defining scope even after that scope has returned.
+Before executing your code, the engine does a registration pass over each scope: declarations are recorded up front, which is why some names "exist" before their line. What differs is *how much* of them exists:
 
 ```js
-function counter() {
-  let count = 0;
-  return () => ++count;
+sayHi();  // ✅ "hi" — function DECLARATIONS are hoisted with their body
+function sayHi() { console.log('hi'); }
+
+sayBye(); // ❌ TypeError: sayBye is not a function
+var sayBye = function () {};
+// `sayBye` the VARIABLE was hoisted (as undefined); the function is only
+// assigned when execution reaches that line — so you called undefined.
+
+greet();  // ❌ ReferenceError — TDZ
+const greet = () => {};
+```
+So: function declarations → fully usable early; `var` → exists as `undefined`; `let`/`const`/`class` → exist but untouchable (TDZ). Classes behave like `let`: `new A()` before `class A {}` throws. The interview probe is almost always the middle case — "why TypeError and not ReferenceError?" — because the variable *does* exist, it's just `undefined`.
+
+### Explain closures (with examples).
+A closure is a function bundled with its lexical scope: it keeps *live access* to the variables of the scope where it was defined, even after that scope's function has returned. The engine keeps those variables alive as long as some function still references them.
+
+**Use 1 — private state (the classic):**
+```js
+function createWallet() {
+  let balance = 0;                       // invisible from outside
+  return {
+    deposit(amt) { balance += amt; return balance; },
+    getBalance() { return balance; }
+  };
 }
-const inc = counter();
-inc(); // 1
-inc(); // 2 — `count` lives on, privately
+const w = createWallet();
+w.deposit(100);   // 100
+w.balance;        // undefined — no way to touch it except through the methods
 ```
 
-Real uses: private state, factory functions, memoization, callbacks capturing request context. Pitfalls: closures capturing large objects keep them from being garbage-collected (a classic memory-leak source), and the old `var`-in-a-loop bug where all callbacks share one variable.
+**Use 2 — function factories:**
+```js
+const multiplier = x => y => x * y;
+const double = multiplier(2);   // `x = 2` captured in the closure
+double(5);                      // 10
+```
+
+**Use 3 — memoization:** the cache `Map` lives in the closure, private to the memoized function (full implementation in Section 16).
+
+**The pitfall — accidental memory retention.** A closure keeps *everything it references* alive:
+```js
+function attach(bigData) {           // bigData: 200 MB
+  server.on('request', () => console.log(bigData.length));
+  // this listener pins ALL of bigData in memory for the server's lifetime
+}
+// Fix: capture only what you need
+function attach(bigData) {
+  const len = bigData.length;
+  server.on('request', () => console.log(len));
+}
+```
+Closures are the mechanism behind callbacks "remembering" request context, module patterns, and half the leak reports in long-running Node processes — being able to say both sides is what makes the answer senior.
 
 ### How does `this` work in JavaScript?
-`this` is decided by *how a function is called*, not where it's defined:
-1. Method call `obj.fn()` → `obj`.
-2. Plain call `fn()` → `undefined` in strict mode (modules are strict by default), else the global object.
-3. `fn.call(x)` / `fn.apply(x)` / `fn.bind(x)` → `x` explicitly.
-4. `new Fn()` → the newly created instance.
-5. Arrow functions have **no own `this`** — they inherit it lexically from the enclosing scope. That's why arrows are ideal for callbacks inside class methods, and wrong as object methods when you need `this`.
+`this` is bound at **call time**, by how the function is invoked — not where it was written. The rules in priority order: `new` → explicit (`call/apply/bind`) → method call (`obj.fn()`) → plain call (`undefined` in strict mode — and ES modules/classes are automatically strict — else the global object). Arrow functions opt out entirely: they capture `this` lexically from the enclosing scope.
+
+The classic "losing `this`" demo — walk through every line:
+```js
+const user = {
+  name: 'Ada',
+  hello() { console.log(this?.name); }
+};
+
+user.hello();               // 'Ada'      — method call: this = user
+const fn = user.hello;
+fn();                       // undefined  — plain call: the object link is gone
+setTimeout(user.hello, 0);  // undefined  — same thing: you passed a bare function
+
+setTimeout(() => user.hello(), 0);     // 'Ada' — arrow preserves the call site
+setTimeout(user.hello.bind(user), 0);  // 'Ada' — this permanently fixed
+class Btn { onClick = () => this.save(); } // class-field arrow: same fix, common in React
+```
+The insight to state explicitly: `user.hello` is just a function value; nothing about it "belongs" to `user`. The binding happens (or doesn't) at the moment of the call. That single sentence answers 80% of `this` questions.
 
 ### call vs apply vs bind?
-All set `this` explicitly. `call(thisArg, a, b)` invokes immediately with listed args; `apply(thisArg, [a, b])` invokes immediately with an array; `bind(thisArg, a)` returns a *new function* with `this` (and optionally leading args) permanently fixed — it doesn't invoke.
+All three set `this` explicitly; they differ in *when* the call happens and how arguments are passed:
+```js
+function intro(greeting, punct) {
+  return greeting + ", I'm " + this.name + punct;
+}
+const p = { name: 'Ada' };
+
+intro.call(p, 'Hi', '!');      // "Hi, I'm Ada!"  — invokes NOW, args listed
+intro.apply(p, ['Hi', '!']);   // same             — invokes NOW, args as array
+const bound = intro.bind(p, 'Hey');  // returns a NEW function, does not invoke
+bound('?');                    // "Hey, I'm Ada?"  — 'Hey' was pre-filled (partial application)
+```
+Modern notes: spread has replaced most `apply` uses (`Math.max(...nums)`); `bind` remains genuinely useful for fixing callbacks and partial application. Two gotchas interviewers like: a bound function's `this` **cannot** be overridden by a later `call` (bind wins), and `bind` on an arrow function does nothing to `this` (arrows have none to rebind).
 
 ### Arrow functions vs regular functions?
-Arrows: lexical `this`, no `arguments` object, no `prototype`, can't be used with `new`, can't be generators. Regular functions get dynamic `this` and can be constructors. Interview trap: an arrow function as an EventEmitter/Express handler is fine, but an arrow as a Mongoose/class method that relies on `this` breaks.
+Arrows differ in four ways: no own `this`, no `arguments`, no `prototype`, can't be constructors (`new`). The `this` difference is the one that decides correctness:
+
+```js
+const counter = {
+  count: 0,
+  badInc: () => { this.count++; },   // ❌ `this` is NOT counter — it's whatever
+                                     //    `this` was outside the object literal
+  goodInc() {
+    setTimeout(() => this.count++, 100); // ✅ arrow inherits `this` from goodInc,
+  }                                      //    which was called as counter.goodInc()
+};
+```
+So the rule of thumb: **methods → regular (shorthand) functions; callbacks inside methods → arrows.** The other differences:
+```js
+function f() { return arguments.length; }  // arguments works
+const g = (...args) => args.length;        // arrows use rest params instead
+new (() => {})();                          // ❌ TypeError — not a constructor
+```
+Follow-up they may ask: "why can't arrows be methods on a Mongoose schema / event emitter that documents `this`?" — because those APIs *rely on* dynamic `this` binding, which arrows refuse.
 
 ### Explain prototypal inheritance.
-Every object has an internal link to a prototype object. Property lookup walks that chain until it finds the key or hits `null`. Functions have a `.prototype` object that becomes the prototype of instances created with `new`. ES6 `class` is syntactic sugar over exactly this mechanism — methods live on `ClassName.prototype`, `extends` wires the chain, `super` calls up it.
+Every object has a hidden link (`[[Prototype]]`, readable via `Object.getPrototypeOf`) to another object. Property lookup checks the object itself, then walks link by link until it finds the key or hits `null`. That chain **is** inheritance in JS — no classes copying anything.
 
-### == vs ===?
-`===` compares without coercion (type + value). `==` coerces operands by spec rules, producing surprises (`0 == ''` → true, `null == undefined` → true, `[] == false` → true). Rule: always `===`; the only semi-legit `==` idiom is `x == null` to match both null and undefined.
+```js
+const animal = { eats: true };
+const dog = Object.create(animal);   // dog → animal → Object.prototype → null
+dog.barks = true;
+
+dog.eats;                    // true  — found one link up the chain
+dog.hasOwnProperty('eats');  // false — it's inherited, not an own property
+'eats' in dog;               // true  — `in` checks the whole chain
+```
+
+The vocabulary distinction that trips people: **`Fn.prototype` vs an object's prototype.** `Fn.prototype` is the object that *future instances created with `new Fn()`* will link to; it is not Fn's own prototype link.
+
+```js
+class A { hi() { return 'hi'; } }
+class B extends A {}
+const b = new B();
+b.hi(); // lookup: b → B.prototype → A.prototype (found here)
+Object.getPrototypeOf(B.prototype) === A.prototype; // true — `extends` wired this
+```
+`class` is syntactic sugar over exactly this: methods live on the prototype (shared, memory-efficient — one copy for all instances), `extends` links prototypes, `super` continues lookup up the chain. Shadowing: setting `dog.eats = false` creates an *own* property that masks the inherited one — it never modifies `animal`.
+
+### == vs === ?
+`===` compares type and value with no conversion. `==` runs the abstract-equality coercion algorithm first — and its edge cases are the whole interview question:
+
+```js
+0 == ''            // true   ('' coerces to 0)
+0 == '0'           // true   ('0' → 0)
+'' == '0'          // false  (both strings already — compared as strings)
+null == undefined  // true   (special-cased pair)
+null == 0          // false  (null equals ONLY undefined under ==)
+[] == false        // true   ([] → '' → 0, false → 0)
+'5' === 5          // false  (different types, no coercion)
+```
+Related must-knows:
+```js
+NaN === NaN            // false — NaN equals nothing, even itself
+Number.isNaN(x)        // the correct check
+Object.is(NaN, NaN)    // true;  Object.is(0, -0) → false (=== says true)
+{a:1} === {a:1}        // false — objects compare by REFERENCE, under both operators
+```
+Rule: always `===`. The one defensible `==` idiom is `x == null` as shorthand for "null or undefined." If asked *why* `==` exists: legacy — it predates the language having better options.
 
 ### null vs undefined?
-`undefined` = "no value was assigned" (missing property, unset variable, function with no return). `null` = an intentional, developer-assigned "empty". `typeof undefined` is `"undefined"`; `typeof null` is `"object"` (a famous historical bug).
+`undefined` = the language's own "nothing here": unassigned variables, missing properties, functions without `return`, unpassed parameters. `null` = a deliberate, developer-written "empty on purpose." Two behavioral differences that make this more than trivia:
 
-### Shallow copy vs deep copy — how do you deep clone?
-Spread (`{...obj}`) and `Object.assign` copy one level; nested objects stay shared references. For deep clones: `structuredClone(obj)` (built into Node 17+, handles Dates, Maps, Sets, circular refs; not functions), or `JSON.parse(JSON.stringify(obj))` as the old hack — which drops functions/`undefined`, stringifies Dates, and throws on circular references.
+```js
+function f(x = 10) { return x; }
+f(undefined);  // 10   — default parameters trigger on undefined…
+f(null);       // null — …but NOT on null (null is a real value you passed)
+
+JSON.stringify({ a: undefined, b: null });
+// '{"b":null}' — undefined properties are DROPPED; null survives the round-trip
+```
+Plus the classics: `typeof undefined` → `"undefined"`, `typeof null` → `"object"` (a permanent historical bug), and `null == undefined` is true while `null === undefined` is false. Practical convention: let the language produce `undefined`; use `null` when *you* want to signal "intentionally cleared" (e.g., in JSON APIs and DB fields, where undefined can't exist).
+
+### Shallow vs deep copy — how do you deep clone?
+A shallow copy duplicates only the first level; nested objects are still the **same references** — the source of very real production bugs:
+
+```js
+const original = { name: 'A', address: { city: 'Delhi' } };
+const shallow = { ...original };            // or Object.assign({}, original)
+
+shallow.address.city = 'Mumbai';
+original.address.city;   // 'Mumbai' 😱 — both copies share one address object
+```
+
+Deep cloning options, in order of preference:
+```js
+// 1) structuredClone — built into Node 17+
+const deep = structuredClone(original);
+deep.address.city = 'Pune';
+original.address.city;   // still 'Mumbai' — fully independent
+// Handles: Date, Map, Set, RegExp, typed arrays, CIRCULAR references
+// Doesn't handle: functions (throws), class instances lose their prototype
+
+// 2) The old JSON hack — know its failure modes
+JSON.parse(JSON.stringify({ d: new Date(), fn: () => {}, u: undefined }));
+// → { d: "2026-07-28T…" }   Date became a string; function and undefined vanished
+// → and it THROWS on circular references
+```
+Third option: a hand-written recursive clone with a `WeakMap` for circular refs — that's a coding-round favorite, and the full solution is in Section 16. Interview flow: name `structuredClone` first, then show you know exactly what the JSON hack silently destroys.
 
 ### Spread vs rest operator?
-Same `...` syntax, opposite directions. Spread *expands* an iterable/object into elements (`[...a, ...b]`, `{...defaults, ...overrides}` — later keys win). Rest *collects* remaining items into an array/object (`function f(first, ...rest)`, `const {id, ...others} = obj`).
+Same three dots, opposite directions — **spread expands, rest collects**:
 
-### `??` vs `||`?
-`||` falls back on any falsy value (`0`, `''`, `false` included). `??` (nullish coalescing) falls back only on `null`/`undefined` — so `count ?? 10` correctly keeps a legitimate `0`. Pair with optional chaining: `user?.address?.city ?? 'N/A'`.
+```js
+// SPREAD — unpack into a new container / a call
+const merged = { ...defaults, ...userConfig };  // later keys WIN → override pattern
+const copy   = [...arr];                        // shallow copy
+const all    = [...listA, ...listB];            // concat
+Math.max(...[3, 1, 4]);                         // 4 — array → argument list
+
+// REST — gather leftovers into an array/object
+function sum(...nums) {                         // any arity
+  return nums.reduce((a, b) => a + b, 0);
+}
+const [first, ...others] = [1, 2, 3];           // first=1, others=[2,3]
+const { password, ...safeUser } = user;         // omit a key — the standard way to
+                                                // strip fields before sending a response
+```
+Details worth voicing: object spread copies only **own enumerable** properties (prototype/getters not carried as-is), spread copies are *shallow* (see previous question), and rest must be the **last** parameter. The `{ password, ...safeUser }` omit idiom comes up constantly in real backend code — mention it.
+
+### `||` vs `??` (nullish coalescing)?
+`||` returns the right side for **any falsy** left side — `0`, `''`, `false`, `NaN` included. `??` does it only for `null`/`undefined`. The difference is exactly the bug class where valid falsy values get stomped by defaults:
+
+```js
+const settings = { retries: 0, label: '' };
+
+settings.retries || 3;    // 3   ❌ — 0 was a deliberate, valid value
+settings.retries ?? 3;    // 0   ✅ — only null/undefined fall through
+settings.label ?? 'anon'; // ''  — '' is not nullish, so it's kept
+settings.timeout ??= 5000; // assignment form: set only if currently nullish
+```
+Mixing note: `a || b ?? c` is a SyntaxError without parentheses — the language forces you to disambiguate. Quick sibling: `&&` short-circuits the other way (`isAdmin && deleteAll()`), and `||=`/`&&=` exist alongside `??=`.
+
+### What does optional chaining (`?.`) do?
+Short-circuits to `undefined` instead of throwing when the thing before it is `null`/`undefined` — for property access, indexing, and calls:
+
+```js
+const city = user?.address?.city;   // undefined instead of
+                                    // "TypeError: Cannot read properties of undefined"
+user?.getProfile?.();               // call only if it exists (and user exists)
+rows?.[0];                          // safe index access
+```
+Two precision points: it guards **only** null/undefined — if `getProfile` exists but is a string, `user.getProfile?.()` still throws (it's not a "try/catch operator"); and once the chain short-circuits, the *rest of the chain* is skipped entirely. Pairs naturally with `??` for defaults: `user?.address?.city ?? 'N/A'`. Caution to volunteer: sprinkling `?.` everywhere can hide genuine bugs — if `user` must exist at that point, letting it throw is better than silently computing with `undefined`.
 
 ### Map vs plain Object?
-Map: any key type (objects, functions), preserves insertion order reliably, has `.size`, is directly iterable, and performs better for frequent add/delete. Object: string/symbol keys only, inherits prototype keys, cheaper for small static shapes and JSON. Use Map for dynamic key-value collections; Object for structured records.
+Both are key-value stores; Map is the purpose-built one:
+
+```js
+const m = new Map();
+const keyObj = { id: 1 };
+
+m.set(keyObj, 'metadata');   // ✅ ANY key type — objects, functions…
+m.get(keyObj);               // 'metadata'   ({} keys are impossible for objects —
+                             //  they'd stringify to "[object Object]")
+m.size;                      // 1 — free; objects need Object.keys(o).length
+for (const [k, v] of m) {}   // directly iterable, guaranteed insertion order
+m.has(keyObj); m.delete(keyObj);
+```
+Object advantages: literal syntax, JSON support, destructuring, cheap for small fixed shapes. The serialization gotcha is a good one to volunteer:
+```js
+JSON.stringify(new Map([['a', 1]]));   // '{}' — Maps don't serialize!
+JSON.stringify(Object.fromEntries(m)); // convert first
+```
+Decision rule: **Object = a record/struct with known fields; Map = a dynamic collection** (unknown/user-generated keys, frequent add/delete, non-string keys). Maps also dodge prototype-pollution-style surprises since there are no inherited keys like `constructor` lurking.
 
 ### What are WeakMap / WeakSet good for?
-Their keys are held *weakly* — if nothing else references the key object, the entry is garbage-collected automatically. They're not iterable and have no size. Classic use: attaching metadata/caches to objects (e.g., per-request data) without preventing those objects from being GC'd — avoids memory leaks.
+Their keys are held **weakly**: if the key object becomes unreachable everywhere else, the entry is garbage-collected automatically — the collection never keeps things alive. That makes them the leak-proof way to attach metadata or caches to objects you don't own:
+
+```js
+const parsed = new WeakMap();
+
+function getParsed(req) {                 // req = incoming request object
+  if (!parsed.has(req)) parsed.set(req, expensiveParse(req));
+  return parsed.get(req);
+}
+// When the request ends and `req` is GC'd, its cache entry evaporates.
+// With a regular Map, every request ever seen would stay in memory forever.
+```
+The constraints all follow from GC being non-deterministic: keys must be objects, and there's **no iteration, no `.size`, no `.clear`** — you can't enumerate what might vanish at any moment. WeakSet: same idea for "have I seen/processed this object?" tagging. Advanced name-drops if probed: `WeakRef` and `FinalizationRegistry` exist for manual weak references, and are almost always the wrong tool in app code.
+
+### map / filter / reduce and friends — be fluent.
+The functional array methods are assumed knowledge and show up inside every other coding answer:
+
+```js
+const orders = [
+  { id: 1, amt: 10, paid: true },
+  { id: 2, amt: 20, paid: false },
+  { id: 3, amt: 15, paid: true },
+];
+
+orders.map(o => o.amt);                     // [10, 20, 15]     transform each
+orders.filter(o => o.paid);                 // orders 1 & 3     keep matches
+orders.reduce((sum, o) => sum + o.amt, 0);  // 45               fold to one value
+orders.find(o => o.amt > 12);               // order 2          first match (or undefined)
+orders.some(o => !o.paid);                  // true             at least one?
+orders.every(o => o.paid);                  // false            all?
+orders.flatMap(o => [o.id, o.amt]);         // [1,10,2,20,3,15] map + flatten(1)
+```
+The gotchas that separate candidates:
+```js
+[10, 2, 1].sort();            // [1, 10, 2] ❗ default sort is LEXICOGRAPHIC
+[10, 2, 1].sort((a, b) => a - b);  // [1, 2, 10] — and sort() MUTATES the array
+[].reduce((a, b) => a + b);   // ❗ TypeError — no initial value + empty array
+                              //   → always pass the initial value
+```
+Also say: map/filter/reduce return **new** arrays (non-mutating), unlike push/splice/sort/reverse; newer runtimes add non-mutating twins (`toSorted`, `toReversed`). Chaining reads well but each link is another pass — for one hot path over a huge array, a single loop or one `reduce` is fine.
 
 ### What are generators and where are they useful?
-`function*` functions that can pause at `yield` and resume, producing values lazily through an iterator. Useful for lazy/infinite sequences, custom iteration, and they're the historical foundation of async/await. `async function*` + `for await...of` is the modern pattern for consuming paginated APIs or streams chunk by chunk.
+A `function*` can pause at each `yield` and resume later, keeping its local state between calls. Calling it returns an **iterator**; each `.next()` runs to the next `yield` and hands back `{ value, done }`:
+
+```js
+function* idGen() {
+  let id = 1;
+  while (true) yield id++;   // infinite, but lazy — computes only when asked
+}
+const ids = idGen();
+ids.next().value; // 1
+ids.next().value; // 2   ← state (id) survived between calls
+```
+That's the core trick: **lazy, resumable computation** — sequences too big (or infinite) to materialize, custom iteration for your own data structures (implement `[Symbol.iterator]` with a generator), and historically the machinery async/await was built on.
+
+The version that matters for backend work is the async generator:
+```js
+async function* fetchAllItems(url) {
+  while (url) {
+    const page = await getJson(url);   // one page at a time
+    yield* page.items;                 // hand items out one by one
+    url = page.nextPageUrl;
+  }
+}
+for await (const item of fetchAllItems('/api/items')) {
+  await process(item);   // next page isn't fetched until you're ready — built-in backpressure
+}
+```
+This exact pattern — paginated APIs, DB cursors, stream consumption — is where you say generators earn their keep in real services.
 
 ### How does garbage collection work in V8?
-Mark-and-sweep, generational: new objects go to a small "new space" (scavenged frequently and cheaply); survivors get promoted to "old space" (collected less often with mark-sweep-compact). You don't free memory manually — you make objects unreachable. Leaks in Node are almost always *unintentional reachability*: globals, module-level caches that only grow, event listeners never removed, closures capturing big objects, forgotten timers.
+Model: memory is freed when objects become **unreachable** from the roots (globals, the current stack, active closures). You never free memory; you drop references. V8 is generational, built on the observation that most objects die young: allocations start in a small **new space**, collected frequently by a fast copying "scavenge" (survivors get promoted); long-lived objects live in **old space**, collected by mark-sweep-compact, which modern V8 runs largely concurrently/incrementally to keep pauses short. GC pauses are a real latency factor in Node — a bloated heap means longer marking, which shows up in your p99.
+
+So "memory leak in JS" = **unintentional reachability**. The recurring offenders, in code:
+```js
+// 1) Module-level cache that only grows
+const cache = new Map();
+app.get('/user/:id', (req, res) => {
+  cache.set(req.params.id, load(req.params.id)); // never evicted → grows forever
+});
+// Fix: bounded LRU with eviction/TTL (implementation in Section 16)
+
+// 2) Listener accumulation
+socket.on('data', makeHandler(bigContext)); // registered per request, never removed
+// Fix: pair on/off in cleanup, use once(), heed MaxListenersExceededWarning
+
+// 3) Closures pinning large objects (see the closures question)
+// 4) Forgotten timers: setInterval whose callback references a dead object
+```
+Ops corner: heap limits are tuned with `--max-old-space-size=<MB>` (size it below the container limit), `process.memoryUsage()` exposes heapUsed/rss, and diagnosis = heap snapshots compared over time (full workflow in Section 10). Buffers live *outside* the V8 heap ("external"), which is why RSS can be far above heapUsed in stream-heavy apps.
 
 ### What is a pure function / why does immutability matter?
-Pure = output depends only on inputs, no side effects — trivially testable and cacheable. Immutability (returning new objects instead of mutating) prevents spooky action-at-a-distance bugs, makes change detection cheap (reference equality), and is why patterns like Redux and React state updates require it.
+Pure = two checkable properties: same inputs → same output, and **no side effects** (no mutating arguments or outer state, no I/O, no reading clocks/randomness). Purity buys you trivially easy tests (no setup/mocks), safe caching (memoization is only valid for pure functions), and code you can reorder/parallelize without fear.
+
+```js
+// Impure — mutates its input; every caller now shares the damage
+function addTag(user, tag) { user.tags.push(tag); return user; }
+
+// Pure — returns a NEW object; the original is untouched
+const addTag = (user, tag) => ({ ...user, tags: [...user.tags, tag] });
+```
+Why immutability matters beyond style: mutation across async boundaries is a bug factory (two awaiting code paths sharing one object silently corrupt each other), reference-equality change detection (React/Redux) depends on new-object-on-change, and frozen/fresh objects make time-travel debugging and audit trails possible. Honest caveat to volunteer: copies aren't free — for a hot loop over huge arrays, controlled *local* mutation inside a function that stays pure at its boundary is the pragmatic middle ground.
 
 ### What is currying?
-Transforming `f(a, b, c)` into `f(a)(b)(c)` — each call fixes one argument and returns a function awaiting the rest. Practical value: creating specialized functions from general ones, e.g. `const log = level => msg => ...; const warn = log('warn')`.
+Transforming `f(a, b, c)` into `f(a)(b)(c)` — a chain of single-argument functions, each capturing its argument in a closure and returning the next:
 
-### What's the output? (classic `var` loop trap)
+```js
+const add = (a, b) => a + b;
+const curried = a => b => add(a, b);
+curried(2)(3); // 5
+
+// The practical shape: pre-configured helpers
+const logger = level => msg => console.log('[' + level + '] ' + msg);
+const warn = logger('WARN');       // level is locked in
+warn('disk almost full');          // [WARN] disk almost full
+warn('cert expires soon');         // reuse without repeating config
+```
+Distinction interviewers check: **currying** = strictly unary chain; **partial application** = fixing *some* arguments of any arity — `intro.bind(p, 'Hey')` from the bind question is partial application, not currying. Where it genuinely appears in Node code: configured middleware factories (`requireRole('admin')` returning the actual middleware), loggers, and validator builders — say those instead of abstract FP examples.
+
+### The classic `var`-in-a-loop question.
 ```js
 for (var i = 0; i < 3; i++) setTimeout(() => console.log(i), 0);
-// 3 3 3  — one shared `i`, already 3 when timers fire
+// 3 3 3
+
 for (let i = 0; i < 3; i++) setTimeout(() => console.log(i), 0);
-// 0 1 2  — `let` creates a fresh binding per iteration
+// 0 1 2
 ```
-Fixes for the `var` version historically: an IIFE capturing `i`, or passing `i` as a `setTimeout` argument.
+Why: with `var` there is **one** shared `i` for the whole loop; the three arrow callbacks all close over that single variable, and by the time timers fire (after the loop finishes) it's 3. With `let`, the spec creates a **fresh binding per iteration**, so each callback closed over its own `i`. This one question tests closures + scoping + the event loop at once, which is why it's evergreen.
+
+The historical fixes (know them — "how would you fix it *without* let?" is the follow-up):
+```js
+// 1) IIFE — create a new scope capturing the current value
+for (var i = 0; i < 3; i++) {
+  (function (j) { setTimeout(() => console.log(j), 0); })(i);
+}
+// 2) setTimeout's extra args are passed to the callback
+for (var i = 0; i < 3; i++) setTimeout(j => console.log(j), 0, i);
+```
 
 ---
 
